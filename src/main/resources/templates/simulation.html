@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html xmlns:th="https://www.thymeleaf.org">
+    <head>
+        <title>ScuffedCraft - SimulationCraft but shitty</title>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+
+        <link rel="stylesheet" th:href="@{/simcraft/style/shared.css}" />
+        <link rel="stylesheet" th:href="@{/simcraft/style/sim.css}" />
+
+        <script type="text/javascript" th:src="@{/simcraft/js/jquery.min.js}"></script>
+        <script type="text/javascript" th:src="@{/simcraft/js/highcharts.min.js}"></script>
+        <script type="text/javascript">
+        Highcharts.setOptions({
+            "credits": false,
+            "lang": {
+                "decimalPoint": ".",
+                "thousandsSep": ","
+            },
+            "legend": {
+                "enabled": false,
+                "itemStyle": {
+                    "fontsize": "14px",
+                    "color": "#CACACA"
+                }
+            },
+            "chart": {
+                "borderRadius": 4,
+                "backgroundColor": "#242424",
+                "style": {
+                    "fontSize": "13px"
+                },
+                "spacing": [2, 2, 2, 2]
+            },
+            "xAxis": {
+                "lineColor": "#CACACA",
+                "tickColor": "#CACACA",
+                "title": {
+                    "style": {
+                        "color": "#CACACA"
+                    }
+                },
+                "labels": {
+                    "style": {
+                        "color": "#CACACA",
+                        "fontSize": "14px"
+                    }
+                }
+            },
+            "yAxis": {
+                "lineColor": "#CACACA",
+                "tickColor": "#CACACA",
+                "title": {
+                    "style": {
+                        "color": "#CACACA"
+                    }
+                },
+                "labels": {
+                    "style": {
+                        "color": "#CACACA",
+                        "fontSize": "14px"
+                    }
+                }
+            },
+            "title": {
+                "style": {
+                    "fontSize": "15px",
+                    "color": "#CACACA"
+                }
+            },
+            "subtitle": {
+                "style": {
+                    "fontsize": "13px"
+                }
+            },
+            "tooltip": {
+                "backgroundColor": "#3F3E38",
+                "style": {
+                    "color": "#CACACA"
+                },
+                "valueDecimals": 1
+            },
+            "plotOptions": {
+                "series": {
+                    "shadow": true,
+                    "dataLabels": {
+                        "style": {
+                            "color": "#CACACA"
+                        }
+                    }
+                },
+                "pie": {
+                    "dataLabels": {
+                        "enabled": true,
+                        "style": {
+                            "fontWeight": "none"
+                        }
+                    },
+                    "fillOpacity": 0.2
+                },
+                "bar": {
+                    "borderWidth": 0,
+                    "pointWidth": 18
+                },
+                "column": {
+                    "borderWidth": 0,
+                    "pointWidth": 8
+                },
+                "area": {
+                    "lineWidth": 1.25,
+                    "states": {
+                        "hover": {
+                            "lineWidth": 1
+                        }
+                    },
+                    "fillOpacity": 0.2
+                }
+            }
+        });
+        </script>
+    </head>
+    <body>
+        <div id="masthead" class="section section-open">
+            <span id="logo"></span>
+            <h1><a href="http://www.simulationcraft.org/">SimulationCraft 735-02</a> - but on a scuffed frontend</h1>
+            <h2>for World of Warcraft 7.3.5 Live (wow build level 25901)</h2>
+
+            <div class="clear"></div>
+        </div>
+
+        <form action="#" method="POST" th:object="${simulationInput}" class="section" id="sim-input">
+            <input type="hidden" th:field="*{requestUUID}" />
+
+            <p><input type="checkbox" th:field="*{enableBloodlust}" /> Enable Bloodlust (Heroism, Ancient Hysteria, Time Warp)</p>
+            <p><input type="checkbox" th:field="*{enableScaling}" disabled="disabled" /> Enable scaling factors calculations (This can take up to a minute)</p>
+            <p>Number of enemies: <input type="text" th:field="*{numberOfEnemies}"/></p>
+            <p>
+                Fight type: <select th:field="*{fightType}">
+                    <option th:each="i : ${T(wrptn.scuffedcraft.models.FightStyle).values()}" th:value="${i}" th:text="${i.displayName}"></option>
+                </select>
+            </p>
+            <p>
+                Paste the output of <b>/simc</b> from the SimulationCraft addon below.
+                <br />
+                <textarea th:field="*{profileString}" rows="20" cols="170"></textarea>
+            </p>
+            <p><input type="submit" value="Simulate" /></p>
+        </form>
+
+        <div class="section section-open" id="simulation-progress" th:if="${simulationInput.formSubmit}">
+            Your simulation has been put in queue. Please do not close this page.
+        </div>
+
+        <script th:inline="javascript" th:if="${simulationInput.formSubmit}">
+        /*<![CDATA[*/
+            const outputTarget = document.getElementById("simulation-progress");
+
+            var eventSource = new EventSource("simulation-progress/[(${simulationInput.requestUUID})]");
+            eventSource.onmessage = function (event) {
+                const message = event.data;
+                if (message.startsWith("results;")) {
+                    const resultHTML = message.substring(8);
+
+                    var parser = new DOMParser();
+                    const resultDocument = parser.parseFromString(resultHTML, "text/html");
+                    resultDocument.getElementById("masthead").remove();
+
+                    while (outputTarget.firstChild != null)
+                        outputTarget.lastChild.remove();
+
+                    // Now insert all the sections
+                    resultDocument.querySelectorAll("body > div:not([id=masthead])").forEach(child => {
+                        outputTarget.appendChild(child);
+                    });
+
+                    // Do a final pass to find the JavaScript blocks and inject them.
+                    // Don't inject HighCharts and jQuery because we statically bundle them anyways.
+                    // We use contextual fragments to ensure they are evaluated properly.
+                    const range = document.createRange();
+                    range.selectNode(document.body); // The body is the context
+
+                    resultDocument.querySelectorAll("body > script").forEach(script => {
+                        const documentFragment = range.createContextualFragment(script.outerHTML);
+                        document.body.appendChild(documentFragment);
+                    });
+
+                    eventSource.close();
+                    outputTarget.classList.remove("class"); // Required.
+                } else {
+                    let jsonData = JSON.parse(message);
+                    if (jsonData.type == "queue") {
+                        outputTarget.innerText = "You are position " + jsonData.position + " in queue. Don't close this page.";
+                    } else if (jsonData.type == "error") {
+                        outputTarget.innerText = jsonData.message;
+
+                        eventSource.close();
+                    } else if (jsonData.type == "status") {
+                        if (jsonData.status == "IN_PROGRESS") {
+                            outputTarget.innerText = "Your simulation is in progress. Don't close this page.";
+                        }
+                    } else {
+                        outputTarget.innerText = message;
+                    }
+                }
+            };
+        /*]]>*/
+        </script>
+    </body>
+</html>
