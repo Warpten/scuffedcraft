@@ -19,7 +19,7 @@ public class SimulationInput {
     /**
      * Enables or disable scale factor calculations.
      */
-    private boolean enableScaling = true;
+    private boolean enableScaling = false;
 
     private int numberOfEnemies = 1;
 

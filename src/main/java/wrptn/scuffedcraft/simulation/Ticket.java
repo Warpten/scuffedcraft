@@ -23,7 +23,8 @@ import static org.springframework.util.StringUtils.hasText;
 import static wrptn.scuffedcraft.json.Builders.object;
 
 public class Ticket {
-    private final Sinks.Many<String> sink = Sinks.many().unicast().onBackpressureBuffer();
+    private final Sinks.Many<String> resultsSink = Sinks.many().unicast().onBackpressureBuffer();
+    private final Sinks.Many<String> executionSink = Sinks.many().unicast().onBackpressureBuffer();
 
     @Getter
     private final SimulationInput input;
@@ -31,11 +32,13 @@ public class Ticket {
     @Getter
     private int queuePosition;
 
+    private Process executionTask = null;
+
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     public interface Listener {
-        default void onCompleted(Ticket ticket) { }
-        default void onBegin(Ticket ticket) { }
+        default void onCompleted() { }
+        default void onBegin() { }
     }
     private Listener listener = new Listener() { };
 
@@ -48,7 +51,9 @@ public class Ticket {
         this.listener = listener;
     }
 
-    public Flux<String> asFlux() { return this.sink.asFlux(); }
+    public Flux<String> getResultsFlux() { return this.resultsSink.asFlux(); }
+
+    public Flux<String> getExecutionFlux() { return this.executionSink.asFlux(); }
 
     @SneakyThrows
     public void advance() {
@@ -57,12 +62,12 @@ public class Ticket {
         var objectNode = object("type", "queue").with("position", this.queuePosition).end();
         var serializedValue = objectMapper.writeValueAsString(objectNode);
 
-        this.sink.tryEmitNext(serializedValue);
+        this.resultsSink.tryEmitNext(serializedValue);
     }
 
     public void submit(String executablePath) {
         this.emitValue(object("type", "status").with("status", "IN_PROGRESS").end());
-        this.listener.onBegin(this);
+        this.listener.onBegin();
 
         try {
             String outcome = this.invokeSimulationCraft(executablePath);
@@ -70,7 +75,7 @@ public class Ticket {
         } catch (Exception ex) {
             emitThrowable(ex);
         } finally {
-            this.listener.onCompleted(this);
+            this.listener.onCompleted();
         }
     }
 
@@ -78,7 +83,7 @@ public class Ticket {
     private void emitValue(ObjectNode node) {
         var serializedValue = objectMapper.writeValueAsString(node);
 
-        this.sink.tryEmitNext(serializedValue);
+        this.resultsSink.tryEmitNext(serializedValue);
     }
 
     /**
@@ -95,7 +100,7 @@ public class Ticket {
         var objectNode = object("type", "error").with("message", errorMessage).end();
         this.emitValue(objectNode);
 
-        this.sink.tryEmitComplete();
+        this.resultsSink.tryEmitComplete();
     }
 
     /**
@@ -104,17 +109,19 @@ public class Ticket {
      * @param results An HTML page's content to send over the wire.
      */
     public void emitResults(@NonNull String results) {
-        this.sink.tryEmitNext("results;" + results);
-        this.sink.tryEmitComplete();
+        this.resultsSink.tryEmitNext("results;" + results);
+        this.resultsSink.tryEmitComplete();
     }
 
     @SneakyThrows
     private String invokeSimulationCraft(String executablePath) {
         Path inputPath = null;
         Path reportPath = null;
+        Path logsPath = null;
         try {
             inputPath = Files.createTempFile("simc_input_", ".txt");
-            reportPath = Paths.get(inputPath.getParent().toString(), UUID.randomUUID().toString());
+            reportPath = Paths.get(inputPath.getParent().toString(), "simc_output_" + UUID.randomUUID() + ".txt");
+            logsPath = Paths.get(inputPath.getParent().toString(), "simc_logs_" + UUID.randomUUID() + ".txt");
 
             var inputWriter = new BufferedWriter(new FileWriter(inputPath.toFile()));
 
@@ -135,10 +142,10 @@ public class Ticket {
             inputWriter.write("threads=4" + System.lineSeparator());
             inputWriter.write("process_priority=Low" + System.lineSeparator());
             // TODO: This was disabled due to timeouts; check again now that we are using stream events
-            // if (input.isEnableScaling()) {
-            //     inputWriter.write("calculate_scale_factors=1" + System.lineSeparator());
-            //     inputWriter.write("scale_only=str,agi,sta,int,sp,ap,crit,haste,mastery,vers,wdps,wohdps,armor,bonusarmor,leech,runspeed" + System.lineSeparator());
-            // }
+            if (input.isEnableScaling()) {
+                inputWriter.write("calculate_scale_factors=1" + System.lineSeparator());
+                inputWriter.write("scale_only=str,agi,sta,int,sp,ap,crit,haste,mastery,vers,wdps,wohdps,armor,bonusarmor,leech,runspeed" + System.lineSeparator());
+            }
             inputWriter.write("statistics_level=1" + System.lineSeparator());
             inputWriter.write(lineSeparator());
 
@@ -159,11 +166,14 @@ public class Ticket {
             var simcExecutable = Paths.get(executablePath);
 
             var processBuilder = new ProcessBuilder()
-                    .directory(reportPath.getParent().toFile())
-                    .command(simcExecutable.toString(), inputPath.toString(), "html=" + reportPath.getFileName());
+                .directory(reportPath.getParent().toFile())
+                .command(simcExecutable.toString(), inputPath.toString(), "html=" + reportPath.getFileName())
+                // .redirectOutput(ProcessBuilder.Redirect.to(logsPath.toFile()))
+                ;
 
-            var process = processBuilder.start();
-            boolean exitSuccessfully = process.waitFor(60, TimeUnit.SECONDS);
+            this.executionTask = processBuilder.start();
+
+            boolean exitSuccessfully = this.executionTask.waitFor(input.isEnableScaling() ? 5 : 1, TimeUnit.MINUTES);
             if (!exitSuccessfully)
                 throw new TimeoutException("Execution timed out");
 
@@ -176,6 +186,9 @@ public class Ticket {
 
             if (reportPath != null)
                 reportPath.toFile().delete();
+
+            if (logsPath != null)
+                logsPath.toFile().delete();
         }
     }
 }

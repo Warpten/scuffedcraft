@@ -16,6 +16,7 @@ import wrptn.scuffedcraft.simulation.Ticket;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -74,15 +75,15 @@ public class WebFluxSimulationController {
     @GetMapping(path = "/simulation-progress/{requestUUID}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @ResponseBody
     public Flux<String> getSimulationProgress(@PathVariable String requestUUID) throws Exception {
-        var flux = this.simulationTickets.get(requestUUID);
-        if (flux == null) {
+        var simulationTicket = this.simulationTickets.get(requestUUID);
+        if (simulationTicket == null) {
             var objectNode = object("type", "error")
                 .with("message", "Simulation job not found. This is a backend problem; please check back later.")
                 .end();
             return Flux.just(objectMapper.writeValueAsString(objectNode));
         }
 
-        return flux.asFlux().delaySequence(Duration.ofSeconds(5));
+        return simulationTicket.getResultsFlux().delaySequence(Duration.ofSeconds(5));
     }
 
     @PostMapping(path = "/")
@@ -94,15 +95,15 @@ public class WebFluxSimulationController {
         var simulationTicket = new Ticket(input, queuePosition);
         simulationTicket.registerListener(new Ticket.Listener() {
             @Override
-            public void onBegin(Ticket ticket) {
+            public void onBegin() {
                 for (Ticket itr : WebFluxSimulationController.this.simulationTickets.values())
-                    if (ticket != itr)
+                    if (simulationTicket != itr)
                         itr.advance();
             }
 
             @Override
-            public void onCompleted(Ticket ticket) {
-                WebFluxSimulationController.this.simulationTickets.remove(ticket.getInput().getRequestUUID());
+            public void onCompleted() {
+                WebFluxSimulationController.this.simulationTickets.remove(simulationTicket.getInput().getRequestUUID());
             }
         });
 
