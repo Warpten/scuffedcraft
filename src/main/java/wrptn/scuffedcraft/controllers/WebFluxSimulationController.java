@@ -16,7 +16,6 @@ import wrptn.scuffedcraft.simulation.Ticket;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -80,7 +79,7 @@ public class WebFluxSimulationController {
             var objectNode = object("type", "error")
                 .with("message", "Simulation job not found. This is a backend problem; please check back later.")
                 .end();
-            return Flux.just(objectMapper.writeValueAsString(objectNode));
+            return Flux.just(this.objectMapper.writeValueAsString(objectNode));
         }
 
         return simulationTicket.getResultsFlux().delaySequence(Duration.ofSeconds(5));
@@ -107,13 +106,8 @@ public class WebFluxSimulationController {
             }
         });
 
-        boolean offerSuccesfull = this.jobQueue.offer(simulationTicket);
-        if (!offerSuccesfull) {
-            simulationTicket.emitThrowable(new Exception("The job queue is full. Please check back later."));
-        } else {
+        if (simulationTicket.trySubmit(this.jobQueue))
             this.simulationTickets.put(input.getRequestUUID(), simulationTicket);
-        }
-
 
         return "simulation";
     }

@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.Getter;
 import lombok.NonNull;
 import lombok.SneakyThrows;
+import org.jctools.queues.MessagePassingQueue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 import wrptn.scuffedcraft.models.SimulationInput;
@@ -24,10 +27,11 @@ import static wrptn.scuffedcraft.json.Builders.object;
 
 public class Ticket {
     private final Sinks.Many<String> resultsSink = Sinks.many().unicast().onBackpressureBuffer();
-    private final Sinks.Many<String> executionSink = Sinks.many().unicast().onBackpressureBuffer();
 
     @Getter
     private final SimulationInput input;
+
+    private final Logger log;
 
     @Getter
     private int queuePosition;
@@ -45,6 +49,8 @@ public class Ticket {
     public Ticket(@NonNull SimulationInput input, int queuePosition) {
         this.input = input;
         this.queuePosition = queuePosition;
+
+        this.log = LoggerFactory.getLogger(input.getRequestUUID());
     }
 
     public void registerListener(Listener listener) {
@@ -52,8 +58,6 @@ public class Ticket {
     }
 
     public Flux<String> getResultsFlux() { return this.resultsSink.asFlux(); }
-
-    public Flux<String> getExecutionFlux() { return this.executionSink.asFlux(); }
 
     @SneakyThrows
     public void advance() {
@@ -65,13 +69,21 @@ public class Ticket {
         this.resultsSink.tryEmitNext(serializedValue);
     }
 
+    public boolean trySubmit(final MessagePassingQueue<Ticket> jobQueue) {
+        boolean offerSuccesfull = jobQueue.offer(this);
+        if (!offerSuccesfull) {
+            this.emitThrowable(new Exception("The job queue is full. Please check back later."));
+        }
+
+        return offerSuccesfull;
+    }
+
     public void submit(String executablePath) {
         this.emitValue(object("type", "status").with("status", "IN_PROGRESS").end());
         this.listener.onBegin();
 
         try {
-            String outcome = this.invokeSimulationCraft(executablePath);
-            emitResults(outcome);
+            this.invokeSimulationCraft(executablePath);
         } catch (Exception ex) {
             emitThrowable(ex);
         } finally {
@@ -100,28 +112,27 @@ public class Ticket {
         var objectNode = object("type", "error").with("message", errorMessage).end();
         this.emitValue(objectNode);
 
-        this.resultsSink.tryEmitComplete();
+        this.closeSink();;
     }
 
-    /**
-     * Emits the results of the SimulationCraft invocation.
-     *
-     * @param results An HTML page's content to send over the wire.
-     */
-    public void emitResults(@NonNull String results) {
-        this.resultsSink.tryEmitNext("results;" + results);
+    private void closeSink() {
+        this.emitValue(object("type", "end").end());
+
         this.resultsSink.tryEmitComplete();
     }
 
     @SneakyThrows
-    private String invokeSimulationCraft(String executablePath) {
+    private void invokeSimulationCraft(String executablePath) {
         Path inputPath = null;
         Path reportPath = null;
         Path logsPath = null;
         try {
             inputPath = Files.createTempFile("simc_input_", ".txt");
             reportPath = Paths.get(inputPath.getParent().toString(), "simc_output_" + UUID.randomUUID() + ".txt");
-            logsPath = Paths.get(inputPath.getParent().toString(), "simc_logs_" + UUID.randomUUID() + ".txt");
+            logsPath = Files.createTempFile( "simc_logs_", ".txt");
+
+            log.info("Beginning simulation with input from '{}' and output to '{}'. Logs are written to '{}'.",
+                inputPath.getFileName(), reportPath.getFileName(), logsPath.getFileName());
 
             var inputWriter = new BufferedWriter(new FileWriter(inputPath.toFile()));
 
@@ -141,10 +152,9 @@ public class Ticket {
             inputWriter.write("override.mortal_wounds=1" + System.lineSeparator());
             inputWriter.write("threads=4" + System.lineSeparator());
             inputWriter.write("process_priority=Low" + System.lineSeparator());
-            // TODO: This was disabled due to timeouts; check again now that we are using stream events
             if (input.isEnableScaling()) {
                 inputWriter.write("calculate_scale_factors=1" + System.lineSeparator());
-                inputWriter.write("scale_only=str,agi,sta,int,sp,ap,crit,haste,mastery,vers,wdps,wohdps,armor,bonusarmor,leech,runspeed" + System.lineSeparator());
+                inputWriter.write("scale_only=str,agi,int,crit,haste,mastery,vers" + System.lineSeparator());
             }
             inputWriter.write("statistics_level=1" + System.lineSeparator());
             inputWriter.write(lineSeparator());
@@ -168,18 +178,26 @@ public class Ticket {
             var processBuilder = new ProcessBuilder()
                 .directory(reportPath.getParent().toFile())
                 .command(simcExecutable.toString(), inputPath.toString(), "html=" + reportPath.getFileName())
-                // .redirectOutput(ProcessBuilder.Redirect.to(logsPath.toFile()))
+                .redirectOutput(ProcessBuilder.Redirect.to(logsPath.toFile()))
                 ;
 
             this.executionTask = processBuilder.start();
 
-            boolean exitSuccessfully = this.executionTask.waitFor(input.isEnableScaling() ? 5 : 1, TimeUnit.MINUTES);
+            boolean exitSuccessfully = this.executionTask.waitFor(input.isEnableScaling() ? 10 : 1, TimeUnit.MINUTES);
             if (!exitSuccessfully)
                 throw new TimeoutException("Execution timed out");
 
             // Read report file
-            var reportReader = new BufferedReader(new FileReader(reportPath.toFile()));
-            return reportReader.lines().collect(joining(lineSeparator()));
+            try (var reportReader = new BufferedReader(new FileReader(reportPath.toFile()))) {
+                this.resultsSink.tryEmitNext("results;" + reportReader.lines().collect(joining(lineSeparator())));
+            }
+
+            try (var reportReader = new BufferedReader(new FileReader(logsPath.toFile()))) {
+                this.emitValue(object("type", "log")
+                    .with("line", reportReader.lines().collect(joining(lineSeparator()))).end());
+            }
+
+            this.closeSink();
         } finally {
             if (inputPath != null)
                 inputPath.toFile().delete();

@@ -150,9 +150,16 @@
             Your simulation has been put in queue. Please do not close this page.
         </div>
 
+        <div class="section section-open" id="simulation-logs" th:if="${simulationInput.formSubmit}">
+            <h2 class="toggle">Simulation logs</h2>
+            <div class="toggle-content hide" style="display: none;">
+            </div>
+        </div>
+
         <script th:inline="javascript" th:if="${simulationInput.formSubmit}">
         /*<![CDATA[*/
             const outputTarget = document.getElementById("simulation-progress");
+            const logTarget = document.querySelector("div#simulation-logs > div.toggle-content");
 
             var eventSource = new EventSource("simulation-progress/[(${simulationInput.requestUUID})]");
             eventSource.onmessage = function (event) {
@@ -183,20 +190,21 @@
                         document.body.appendChild(documentFragment);
                     });
 
-                    eventSource.close();
-                    outputTarget.classList.remove("class"); // Required.
+                    outputTarget.classList.remove("section"); // Required.
                 } else {
                     let jsonData = JSON.parse(message);
                     if (jsonData.type == "queue") {
                         outputTarget.innerText = "You are position " + jsonData.position + " in queue. Don't close this page.";
                     } else if (jsonData.type == "error") {
                         outputTarget.innerText = jsonData.message;
-
-                        eventSource.close();
                     } else if (jsonData.type == "status") {
                         if (jsonData.status == "IN_PROGRESS") {
                             outputTarget.innerText = "Your simulation is in progress. Don't close this page.";
                         }
+                    } else if (jsonData.type == "log") {
+                        logTarget.innerText = jsonData.line;
+                    } else if (jsonData.type == "end") {
+                        eventSource.close();
                     } else {
                         outputTarget.innerText = message;
                     }
